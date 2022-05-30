@@ -9,46 +9,26 @@ from binascii import hexlify, unhexlify
 LOCAL_HOST = "127.0.0.1"
 TIME_OUT = 5.0
 
-PACKET_MAX_LENGTH = 1500
 DATA_MAX_LENGTH = 1488
+CAL_DIFF = 12
 
 DISCOVERY = 0x01
 OFFER = 0x02
 REQUEST = 0x03
 ACKNOWLEDGE = 0x04
-DATA_MODE = 0x05
+DATA = 0x05
 IS_AVAILABLE = 0x06
 AVAILABLE = 0x07
-LOCATION_MODE = 0x08
+LOCATIONS = 0x08
 DISTANCE = 0x09
-CHUNKS_MODE = 0x0a
-LAST_CHUNKS_MODE = 0x0b
+MORE_PKT = 0x0a
+END_PKT = 0x0b
 INVALID = 0x00
-AVAIL_MODES = [DISCOVERY, OFFER, REQUEST, ACKNOWLEDGE, DATA_MODE, AVAILABLE, IS_AVAILABLE, LOCATION_MODE, DISTANCE,
-               CHUNKS_MODE, LAST_CHUNKS_MODE]
-
-# 最后改
-N_ASSIGNED_IP = 'asset_ip'
-N_D_DISTANCE = 'direct_distance'
-N_UDP_ADDR = 'udp_address'
-N_SOCKET = 'socket'
-N_TIMER = 'timer'
-NEIGHBOURS = dict()
-
-P_SWITCH = "switch"
-P_DISTANCE = "distance"
-PATH = dict()
-
-DQ_PKT = "packet"
-DQ_S = "socket"
-DATA_QUEUE = dict()  # Data to send to adapter when it is available
-
-# {source_ip: dataString}
-DATA_COLLECTED = dict()  # Collect chunks of data for later concatenation
+AVAIL_MODES = [DISCOVERY, OFFER, REQUEST, ACKNOWLEDGE, DATA, AVAILABLE, IS_AVAILABLE, LOCATIONS, DISTANCE,
+               MORE_PKT, END_PKT]
 
 LATITUDE = None
 LONGITUDE = None
-
 TCP_NUMBERS = 0
 UDP_NUMBERS = 0
 UDP_MAX = 0
@@ -57,7 +37,22 @@ MY_IP = None
 TCP_IP = None
 GLOBAL_IP = None
 
-# Using Lock to prevent the race condition
+CON_IP = 'asset_ip'
+CON_DISTANCE = 'direct_distance'
+CON_ADDRESS = 'udp_address'
+CON_SOCKET = 'socket'
+CON_TIMER = 'timer'
+PKT_SWITCH = "switch"
+PKT_DISTANCE = "distance"
+SET_PACKET = "packet"
+SET_SOCKET = "socket"
+PKT_LIST = dict()
+DATA_OBJECT = dict()
+PKT_PATH = dict()
+NEIBERLIST = dict()
+
+TYPE = ["TCP", "UDP"]
+
 lock = threading.Lock()
 
 
@@ -112,12 +107,13 @@ def ip_format(ip):
 def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None):
     global UDP_NUMBERS
     global TCP_NUMBERS
-    global NEIGHBOURS
+    global NEIBERLIST
     global tcp_socket
     global TCP_MAX
-    global PATH
+    global PKT_PATH
     global LATITUDE
     global LONGITUDE
+    global TYPE
     resp_packets = []
     try:
         (source_ip, destination_ip, reserved, mode, asset_ip) = greeting(packet, 'GREETING')
@@ -127,21 +123,21 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
     # Separate according to different modes
     # DISCOVERY
     if mode == DISCOVERY:
-        if pro_type == "TCP" and TCP_NUMBERS < TCP_MAX:
+        if pro_type == TYPE[0] and TCP_NUMBERS < TCP_MAX:
             from_ip = TCP_IP
-            next_ip = ip_tans(TCP_IP, TCP_NUMBERS)
+            second_ip = ip_tans(TCP_IP, TCP_NUMBERS)
             TCP_NUMBERS = TCP_NUMBERS + 1
-            asset_ip = ip_format(next_ip)
+            asset_ip = ip_format(second_ip)
             end_ip = source_ip
             cur_mode = OFFER
             given_packet = create_greeting_pkt(socket.inet_aton(from_ip), end_ip, bytes(3), cur_mode, (
                 socket.inet_aton(asset_ip),))
             service.sendall(given_packet)
-        elif pro_type == "UDP" and UDP_NUMBERS < UDP_MAX:
+        elif pro_type == TYPE[1] and UDP_NUMBERS < UDP_MAX:
             from_ip = MY_IP
-            next_ip = ip_tans(MY_IP, UDP_NUMBERS)
+            second_ip = ip_tans(MY_IP, UDP_NUMBERS)
             UDP_NUMBERS = UDP_NUMBERS + 1
-            asset_ip = ip_format(next_ip)
+            asset_ip = ip_format(second_ip)
             end_ip = source_ip
             cur_mode = OFFER
             given_packet = create_greeting_pkt(socket.inet_aton(from_ip), end_ip, bytes(3), cur_mode, (
@@ -154,7 +150,7 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
         cur_mode = REQUEST
         from_ip = '0.0.0.0'
         end_ip = source_ip
-        if pro_type == "TCP":
+        if pro_type == TYPE[0]:
             service.sendall(create_greeting_pkt(socket.inet_aton(from_ip), end_ip, bytes(3), cur_mode, (asset_ip,)))
         else:
             service.sendto(create_greeting_pkt(socket.inet_aton(from_ip), end_ip, bytes(3), cur_mode, (asset_ip,)),
@@ -163,118 +159,101 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
 
     # REQUEST
     elif mode == REQUEST:
-        # Send ack
-        if pro_type == "TCP":
+        if pro_type == TYPE[0]:
             from_ip = TCP_IP
-            n_info = {N_ASSIGNED_IP: TCP_IP,
-                      N_SOCKET: service, N_TIMER: threading.Timer(TIME_OUT, mylog)}
-        elif pro_type == "UDP":
+            con_obj = {CON_IP: TCP_IP, CON_SOCKET: service, CON_TIMER: threading.Timer(TIME_OUT, mylog)}
+        elif pro_type == TYPE[1]:
             from_ip = MY_IP
-            n_info = {N_ASSIGNED_IP: MY_IP,
-                      N_SOCKET: service, N_UDP_ADDR: udp_address, N_TIMER: threading.Timer(TIME_OUT, mylog)}
+            con_obj = {CON_IP: MY_IP, CON_SOCKET: service, CON_ADDRESS: udp_address, CON_TIMER: threading.Timer(
+                TIME_OUT, mylog)}
 
         end_ip = asset_ip
         cur_mode = ACKNOWLEDGE
+        NEIBERLIST[socket.inet_ntoa(asset_ip)] = con_obj
+        ack_pkt = create_greeting_pkt(socket.inet_aton(from_ip), end_ip, bytes(3), cur_mode, (asset_ip,))
 
-        # Update NEIGHBOURS
-        # if client_type == "server" and pro_type == "UDP":
-        NEIGHBOURS[socket.inet_ntoa(asset_ip)] = n_info
-
-        ack_pkt = create_greeting_pkt(socket.inet_aton(from_ip), end_ip, bytes(
-            3), cur_mode, (asset_ip,))
-
-        if pro_type == "TCP":
+        if pro_type == TYPE[0]:
             service.sendall(ack_pkt)
         else:
             service.sendto(ack_pkt, udp_address)
 
     # ACKNOWLEDGE
-    elif mode == ACKNOWLEDGE or (mode == LOCATION_MODE and client_type == "server"):
+    elif mode == ACKNOWLEDGE or (mode == LOCATIONS and client_type == "server"):
         if client_type == "client":
-            n_info = {N_ASSIGNED_IP: socket.inet_ntoa(
-                asset_ip), N_SOCKET: service, N_TIMER: threading.Timer(TIME_OUT, mylog)}
-            NEIGHBOURS[socket.inet_ntoa(source_ip)] = n_info
+            con_obj = {CON_IP: socket.inet_ntoa(asset_ip), CON_SOCKET: service, CON_TIMER: threading.Timer(
+                TIME_OUT, mylog)}
+            NEIBERLIST[socket.inet_ntoa(source_ip)] = con_obj
             from_ip = asset_ip
         else:
-            from_ip = socket.inet_aton(
-                TCP_IP if pro_type == "TCP" else MY_IP)
-
-        # Send its Location back
+            from_ip = socket.inet_aton(TCP_IP if pro_type == TYPE[0] else MY_IP)
         end_ip = source_ip
-        cur_mode = LOCATION_MODE
+        cur_mode = LOCATIONS
         axis = struct.pack('>H', LATITUDE)
         yaxis = struct.pack('>H', LONGITUDE)
-        location_pkt = create_greeting_pkt(
-            from_ip, end_ip, bytes(3), cur_mode, (axis, yaxis,))
+        location_pkt = create_greeting_pkt(from_ip, end_ip, bytes(3), cur_mode, (axis, yaxis,))
 
-        if pro_type == "TCP":
+        if pro_type == TYPE[0]:
             service.sendall(location_pkt)
         else:
             service.sendto(location_pkt, udp_address)
 
-    elif mode == DATA_MODE or mode == CHUNKS_MODE or mode == LAST_CHUNKS_MODE:
-        packet_len = len(packet)
-        packet_chunks = []
+    elif mode == DATA or mode == MORE_PKT or mode == END_PKT:
+        pkt_length = len(packet)
+        pkt_sums = []
 
-        if packet_len > PACKET_MAX_LENGTH:
-            data_len = packet_len - 12
-            num_full_packets = math.floor(data_len / DATA_MAX_LENGTH)
-            for i in range(num_full_packets):
-                new_reserved = unhexlify(hexlify(i * DATA_MAX_LENGTH.to_bytes(3, 'big')).decode('utf-8'))
-                cur_mode = CHUNKS_MODE
+        if pkt_length > 1500:
+            data_length = pkt_length - CAL_DIFF
+            all_pkts = math.floor(data_length / DATA_MAX_LENGTH)
+            for i in range(all_pkts):
+                cur_reserve = unhexlify(hexlify(i * DATA_MAX_LENGTH.to_bytes(3, byteorder='big')).decode('utf-8'))
+                cur_mode = MORE_PKT
                 data_chunk = asset_ip[i * DATA_MAX_LENGTH:(DATA_MAX_LENGTH * (i + 1))]
-                packet_chunk = create_greeting_pkt(
-                    source_ip, destination_ip, new_reserved, cur_mode, (data_chunk,))
-                packet_chunks.append(packet_chunk)
-            consumed_data_len = num_full_packets * DATA_MAX_LENGTH
-            remain_data_len = data_len - consumed_data_len
-            if remain_data_len > 0:
-                new_reserved = unhexlify(hexlify(DATA_MAX_LENGTH.to_bytes(3, 'big')).decode('utf-8'))
-                cur_mode = LAST_CHUNKS_MODE
-                remain_data = asset_ip[consumed_data_len:data_len]
-                last_packet_chunk = create_greeting_pkt(
-                    source_ip, destination_ip, new_reserved, cur_mode, (remain_data,))
-                packet_chunks.append(last_packet_chunk)
+                packet_chunk = create_greeting_pkt(source_ip, destination_ip, cur_reserve, cur_mode, (data_chunk,))
+                pkt_sums.append(packet_chunk)
+            used_length = all_pkts * DATA_MAX_LENGTH
+            last_length = data_length - used_length
+            if last_length > 0:
+                cur_reserve = unhexlify(hexlify(DATA_MAX_LENGTH.to_bytes(3, byteorder='big')).decode('utf-8'))
+                cur_mode = END_PKT
+                remain_data = asset_ip[used_length:data_length]
+                last_packet_chunk = create_greeting_pkt(source_ip, destination_ip, cur_reserve, cur_mode, (remain_data,))
+                pkt_sums.append(last_packet_chunk)
         else:
-            packet_chunks = [packet]
+            pkt_sums = [packet]
 
-        # Switch receives chunks of data whose destination is its ip addr
-        o_dest_ip = socket.inet_ntoa(destination_ip)
-        o_src_ip = socket.inet_ntoa(source_ip)
-        if o_dest_ip == TCP_IP or o_dest_ip == MY_IP:  # The switch received the message
-            data_b = asset_ip
-            message = data_b.decode()
-            if mode == DATA_MODE:
-                print(
-                    f'\b\bReceived from {socket.inet_ntoa(source_ip)}: {message}', flush=True)
-                print("> ", end="", flush=True)
-            elif mode == CHUNKS_MODE:
-                if o_src_ip not in DATA_COLLECTED:
-                    DATA_COLLECTED[o_src_ip] = message
+        origin_ip = socket.inet_ntoa(destination_ip)
+        origin_sip = socket.inet_ntoa(source_ip)
+        if origin_ip == TCP_IP or origin_ip == MY_IP:
+            object_pass = asset_ip
+            content = object_pass.decode()
+            if mode == DATA:
+                print(f'\b\bReceived from {socket.inet_ntoa(source_ip)}: {content}')
+                sys.stdout.flush()
+                print("> ", end="")
+                sys.stdout.flush()
+            elif mode == MORE_PKT:
+                if origin_sip not in DATA_OBJECT:
+                    DATA_OBJECT[origin_sip] = content
                 else:
-                    DATA_COLLECTED[o_src_ip] += message
-            elif mode == LAST_CHUNKS_MODE:
-                DATA_COLLECTED[o_src_ip] += message
-                print(
-                    f'\b\bReceived from {socket.inet_ntoa(source_ip)}: {DATA_COLLECTED[o_src_ip]}', flush=True)
-                print("> ", end="", flush=True)
-
+                    DATA_OBJECT[origin_sip] += content
+            elif mode == END_PKT:
+                print(f'\b\bReceived from {socket.inet_ntoa(source_ip)}: {DATA_OBJECT[origin_sip]}')
+                sys.stdout.flush()
+                print("> ", end="")
+                sys.stdout.flush()
+                DATA_OBJECT[origin_sip] += content
             return
 
-        # Determine next switch to send
-        if o_dest_ip not in PATH.keys():
-            # Find in the NEIGHBOUTS the assigned ip that has given socket
-            this_assigned_ip = None
-            for n_ip in NEIGHBOURS:
-                if NEIGHBOURS[n_ip][N_SOCKET] == service:
-                    this_assigned_ip = n_ip
-            candidates = list(NEIGHBOURS.keys())
-            candidates.remove(this_assigned_ip)
-            # next ip except for the sending ip
-
-            end_ip_bin = ' '.join(format(int(x), '08b') for x in o_dest_ip.split('.'))
+        if origin_ip not in PKT_PATH.keys():
+            cur_set_ip = None
+            for neibor_ip in NEIBERLIST:
+                if NEIBERLIST[neibor_ip][CON_SOCKET] == service:
+                    cur_set_ip = neibor_ip
+            holdings = list(NEIBERLIST.keys())
+            holdings.remove(cur_set_ip)
+            end_ip_bin = ' '.join(format(int(x), '08b') for x in origin_ip.split('.'))
             long_list = []
-            for ip in candidates:
+            for ip in holdings:
                 longest_item = 0
                 ip_bin = ' '.join(format(int(x), '08b') for x in ip.split('.'))
                 for index, b in enumerate(end_ip_bin):
@@ -284,171 +263,146 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
                         break
                 long_list.append(longest_item)
             if long_list:
-                next_ip = candidates[long_list.index(max(long_list))]
+                second_ip = holdings[long_list.index(max(long_list))]
             else:
-                next_ip = None
+                second_ip = None
 
         else:
-            next_ip = PATH[o_dest_ip][P_SWITCH]
-            if not next_ip:
-                next_ip = o_dest_ip
+            second_ip = PKT_PATH[origin_ip][PKT_SWITCH]
+            if not second_ip:
+                second_ip = origin_ip
 
-        sock_to_send = NEIGHBOURS[next_ip][N_SOCKET]
+        socket_sent = NEIBERLIST[second_ip][CON_SOCKET]
 
-        # Update Data queue and send AVAILABLE
         if MY_IP and TCP_IP:
-            next_ip = o_dest_ip
-            if next_ip not in NEIGHBOURS:
+            second_ip = origin_ip
+            if second_ip not in NEIBERLIST:
                 return
 
-        # Update the data queue for next switch
-        if next_ip not in DATA_QUEUE:
-            DATA_QUEUE[next_ip] = {
-                DQ_PKT: packet_chunks, DQ_S: sock_to_send}
-        elif next_ip in DATA_QUEUE and not DATA_QUEUE[next_ip][DQ_PKT]:
-            DATA_QUEUE[next_ip][DQ_PKT] = packet_chunks
+        if second_ip not in PKT_LIST:
+            PKT_LIST[second_ip] = {SET_PACKET: pkt_sums, SET_SOCKET: socket_sent}
+        elif second_ip in PKT_LIST and not PKT_LIST[second_ip][SET_PACKET]:
+            PKT_LIST[second_ip][SET_PACKET] = pkt_sums
         else:
-            DATA_QUEUE[next_ip][DQ_PKT].extend(packet_chunks)
+            PKT_LIST[second_ip][SET_PACKET].extend(pkt_sums)
 
-        # Send AVAILABLE to the next switch, save packets to queue if data chunks
-        if mode == CHUNKS_MODE:
+        if mode == MORE_PKT:
             return
 
-        dest_timer = NEIGHBOURS[next_ip][N_TIMER]
-        if not dest_timer.is_alive():  # Check the timer
+        finish_time = NEIBERLIST[second_ip][CON_TIMER]
+        if not finish_time.is_alive():
             cur_mode = IS_AVAILABLE
-            is_avail_packet = create_greeting_pkt(
-                socket.inet_aton(NEIGHBOURS[next_ip][N_ASSIGNED_IP]), socket.inet_aton(next_ip), bytes(3), cur_mode,
-                (bytes(),))
+            packet_available = create_greeting_pkt(socket.inet_aton(NEIBERLIST[second_ip][CON_IP]), socket.inet_aton(second_ip), bytes(3), cur_mode,(bytes(),))
             if TCP_IP and MY_IP:
-                udp_address = NEIGHBOURS[next_ip][N_UDP_ADDR]
-                sock_to_send.sendto(is_avail_packet, udp_address)
+                udp_address = NEIBERLIST[second_ip][CON_ADDRESS]
+                socket_sent.sendto(packet_available, udp_address)
             else:
-                sock_to_send.sendall(is_avail_packet)
+                socket_sent.sendall(packet_available)
 
             try:
-                dest_timer.start()
+                finish_time.start()
             except RuntimeError:
-                dest_timer = threading.Timer(TIME_OUT, mylog)
-                dest_timer.start()
+                finish_time = threading.Timer(TIME_OUT, mylog)
+                finish_time.start()
             return
 
     elif mode == IS_AVAILABLE:
         from_ip = destination_ip
         end_ip = source_ip
         cur_mode = AVAILABLE
-        avail_pkt = create_greeting_pkt(from_ip, end_ip, bytes(
-            3), cur_mode, (bytes(),))
-        if pro_type == "UDP":
+        avail_pkt = create_greeting_pkt(from_ip, end_ip, bytes(3), cur_mode, (bytes(),))
+        if pro_type == TYPE[1]:
             service.sendto(avail_pkt, udp_address)
         else:
             service.sendall(avail_pkt)
 
     elif mode == AVAILABLE:
-        sock_to_send = DATA_QUEUE[socket.inet_ntoa(source_ip)][DQ_S]
-        packet_list = DATA_QUEUE[socket.inet_ntoa(source_ip)][DQ_PKT]
+        socket_sent = PKT_LIST[socket.inet_ntoa(source_ip)][SET_SOCKET]
+        packet_list = PKT_LIST[socket.inet_ntoa(source_ip)][SET_PACKET]
         for packet in packet_list:
-            if pro_type == "UDP":
-                sock_to_send.sendto(packet, udp_address)
+            if pro_type == TYPE[1]:
+                socket_sent.sendto(packet, udp_address)
             else:
-                sock_to_send.sendall(packet)
-        # reset data queue
-        packet_list = []
+                socket_sent.sendall(packet)
 
     # Calc distance and broadcast
     # 𝑑𝑖𝑠𝑡𝑎𝑛𝑐𝑒 = √(465 − 2)2 + (784 − 5)2 = 906.20 ≈ 906
-    if mode == LOCATION_MODE:
+    if mode == LOCATIONS:
         try:
-            (source_ip, destination_ip, reserved, mode, axis, yaxis) = greeting(
-                packet, 'LOCATION')  # bytes
-        except:
+            (source_ip, destination_ip, reserved, mode, axis, yaxis) = greeting(packet, 'LOCATION')
+        except (Exception,):
             return
 
         cur_mode = DISTANCE
-        rcv_latt = int.from_bytes(axis, 'big')
-        rcv_longt = int.from_bytes(yaxis, 'big')
-        distance = math.floor(
-            math.sqrt((LATITUDE - rcv_latt) ** 2 + (LONGITUDE - rcv_longt) ** 2))
+        rcv_latt = int.from_bytes(axis, byteorder='big')
+        rcv_longt = int.from_bytes(yaxis, byteorder='big')
+        distance = math.floor(math.sqrt((LATITUDE - rcv_latt) ** 2 + (LONGITUDE - rcv_longt) ** 2))
 
         if distance > 1000:
             return
 
-        # Update NEIGHBOURS direct distance
-        NEIGHBOURS[socket.inet_ntoa(source_ip)][N_D_DISTANCE] = distance
-        # Update PATH distance
-        if socket.inet_ntoa(source_ip) not in PATH or (
-                socket.inet_ntoa(source_ip) in PATH and PATH[socket.inet_ntoa(source_ip)][P_DISTANCE] > distance):
-            PATH[socket.inet_ntoa(source_ip)] = {
-                P_SWITCH: None, P_DISTANCE: distance}
-        if MY_IP and client_type == "server":  # Local switch with 2 IP recv location
-            # Send distance of UDP port to global switch
+        NEIBERLIST[socket.inet_ntoa(source_ip)][CON_DISTANCE] = distance
+        if socket.inet_ntoa(source_ip) not in PKT_PATH or (
+                socket.inet_ntoa(source_ip) in PKT_PATH and PKT_PATH[socket.inet_ntoa(source_ip)][PKT_DISTANCE] > distance):
+            PKT_PATH[socket.inet_ntoa(source_ip)] = {PKT_SWITCH: None, PKT_DISTANCE: distance}
+        if MY_IP and client_type == "server":
             from_ip = destination_ip
             new_dest_ip = source_ip
-            distance_pkt = create_greeting_pkt(from_ip, new_dest_ip, bytes(
-                3), cur_mode, (socket.inet_aton(MY_IP), distance.to_bytes(4, byteorder='big'),))
+            distance_pkt = create_greeting_pkt(from_ip, new_dest_ip, bytes(3), cur_mode, (
+                socket.inet_aton(MY_IP), distance.to_bytes(4, byteorder='big'),))
             service.sendall(distance_pkt)
             return
 
-        # Broadcast distance to all of the NEIGHBOURS
-        for n_ip in NEIGHBOURS.keys():
-            if n_ip == socket.inet_ntoa(source_ip):
+        for neibor_ip in NEIBERLIST.keys():
+            if neibor_ip == socket.inet_ntoa(source_ip):
                 continue
-            from_ip = NEIGHBOURS[n_ip][N_ASSIGNED_IP]
-            end_ip = n_ip
-            distance_b = (
-                    distance + NEIGHBOURS[n_ip][N_D_DISTANCE]).to_bytes(4, byteorder='big')
-            new_pkt = create_greeting_pkt(socket.inet_aton(
-                from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode, (source_ip, distance_b,))
+            from_ip = NEIBERLIST[neibor_ip][CON_IP]
+            end_ip = neibor_ip
+            next_dis = (distance + NEIBERLIST[neibor_ip][CON_DISTANCE]).to_bytes(4, byteorder='big')
+            cur_pkt = create_greeting_pkt(socket.inet_aton(from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode, (source_ip, next_dis,))
 
-            skt = NEIGHBOURS[n_ip][N_SOCKET]
-            if pro_type == "TCP":
-                skt.sendall(new_pkt)
+            n_socket = NEIBERLIST[neibor_ip][CON_SOCKET]
+            if pro_type == TYPE[0]:
+                n_socket.sendall(cur_pkt)
             else:
-                skt.sendto(new_pkt, udp_address)
-            resp_packets.append(new_pkt)
+                n_socket.sendto(cur_pkt, udp_address)
+            resp_packets.append(cur_pkt)
 
     elif mode == DISTANCE:
         try:
             (source_ip, destination_ip, reserved, mode, target_ip,
              distance) = greeting(packet, 'BROADCAST')
-        except:
+        except (Exception,):
             return
 
         cur_mode = DISTANCE
-        o_src_ip = socket.inet_ntoa(source_ip)
+        origin_sip = socket.inet_ntoa(source_ip)
         o_dst_ip = socket.inet_ntoa(destination_ip)
         o_target_ip = socket.inet_ntoa(target_ip)
-        int_distance = int.from_bytes(distance, "big")
+        int_distance = int.from_bytes(distance, byteorder='big')
 
-        # Already in PATH with smaller distance
-        if (o_target_ip in PATH and PATH[o_target_ip][P_SWITCH] == o_src_ip and PATH[o_target_ip][
-            P_DISTANCE] < int_distance):
+        if (o_target_ip in PKT_PATH and PKT_PATH[o_target_ip][PKT_SWITCH] == origin_sip and PKT_PATH[o_target_ip][PKT_DISTANCE] < int_distance):
             return
 
-        # Update PATH if this S is not the target S and target S is not in PATH or target S already in PATH,
-        # but with larger distance
-        if o_target_ip != TCP_IP and (not o_target_ip in PATH) or (
-                o_target_ip in PATH and PATH[o_target_ip][P_DISTANCE] > int_distance):
+        if o_target_ip != TCP_IP and (not o_target_ip in PKT_PATH) or (
+                o_target_ip in PKT_PATH and PKT_PATH[o_target_ip][PKT_DISTANCE] > int_distance):
             if not MY_IP or (MY_IP and o_target_ip != MY_IP):
-                PATH[o_target_ip] = {
-                    P_SWITCH: o_src_ip, P_DISTANCE: int_distance}
+                PKT_PATH[o_target_ip] = {
+                    PKT_SWITCH: origin_sip, PKT_DISTANCE: int_distance}
 
-        # Brc to NEIGHBOURS
-        for n_ip in NEIGHBOURS.keys():
-            # Else if the neighbour'service ip addr != src,dest,target
-            # Send the BRC to it
-            if n_ip != o_src_ip and n_ip != o_dst_ip and n_ip != o_target_ip:
-                from_ip = NEIGHBOURS[n_ip][N_ASSIGNED_IP]
-                end_ip = n_ip
-                new_d_int = int_distance + NEIGHBOURS[n_ip][N_D_DISTANCE]
-                new_d = new_d_int.to_bytes(4, byteorder='big')
-                new_pkt = create_greeting_pkt(socket.inet_aton(
-                    from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode, (target_ip, new_d,))
-                skt = NEIGHBOURS[n_ip][N_SOCKET]
-                if pro_type == "TCP":
-                    skt.sendall(new_pkt)
+        for neibor_ip in NEIBERLIST.keys():
+            if neibor_ip != origin_sip and neibor_ip != o_dst_ip and neibor_ip != o_target_ip:
+                from_ip = NEIBERLIST[neibor_ip][CON_IP]
+                end_ip = neibor_ip
+                cur_dis_format = int_distance + NEIBERLIST[neibor_ip][CON_DISTANCE]
+                cur_distance = cur_dis_format.to_bytes(4, byteorder='big')
+                cur_pkt = create_greeting_pkt(socket.inet_aton(from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode, (
+                    target_ip, cur_distance,))
+                n_socket = NEIBERLIST[neibor_ip][CON_SOCKET]
+                if pro_type == TYPE[0]:
+                    n_socket.sendall(cur_pkt)
                 else:
-                    skt.sendto(new_pkt, udp_address)
+                    n_socket.sendto(cur_pkt, udp_address)
 
     return resp_packets
 
@@ -485,7 +439,7 @@ def create_connection(prot_code):
     service.sendall(pkt_data)
 
     while True:
-        data = service.recv(PACKET_MAX_LENGTH)
+        data = service.recv(1500)
         lock.acquire()
         greeting_recv(data, "client", service)
         lock.release()
@@ -501,7 +455,7 @@ def tcp_connect():
 def tcp_connected(connect, address):
     with connect:
         while True:
-            packet = connect.recv(PACKET_MAX_LENGTH)
+            packet = connect.recv(1500)
             greeting_recv(packet, "server", connect)
 
 
@@ -515,7 +469,6 @@ def set_max(ip):
     return 2 ** (32 - int(ip)) - 2
 
 
-LOCATION = [LATITUDE, LONGITUDE]
 LATITUDE = sys.argv[3]
 LONGITUDE = sys.argv[4]
 
