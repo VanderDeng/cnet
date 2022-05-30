@@ -11,6 +11,7 @@ TIME_OUT = 5.0
 
 DATA_MAX_LENGTH = 1488
 CAL_DIFF = 12
+MAX_DIS = 1000
 
 DISCOVERY = 0x01
 OFFER = 0x02
@@ -38,7 +39,6 @@ TCP_IP = None
 GLOBAL_IP = None
 
 CON_IP = 'asset_ip'
-CON_DISTANCE = 'direct_distance'
 CON_ADDRESS = 'udp_address'
 CON_SOCKET = 'socket'
 CON_TIMER = 'timer'
@@ -100,6 +100,12 @@ def ip_tans(ip, num):
 
 def ip_format(ip):
     res = str(ipaddress.ip_address(ip))
+
+    return res
+
+
+def cal_distance(lat, log):
+    res = math.floor(math.sqrt((LATITUDE - lat) ** 2 + (LONGITUDE - log) ** 2))
 
     return res
 
@@ -216,7 +222,8 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
                 cur_reserve = unhexlify(hexlify(DATA_MAX_LENGTH.to_bytes(3, byteorder='big')).decode('utf-8'))
                 cur_mode = END_PKT
                 remain_data = asset_ip[used_length:data_length]
-                last_packet_chunk = create_greeting_pkt(source_ip, destination_ip, cur_reserve, cur_mode, (remain_data,))
+                last_packet_chunk = create_greeting_pkt(source_ip, destination_ip, cur_reserve, cur_mode,
+                                                        (remain_data,))
                 pkt_sums.append(last_packet_chunk)
         else:
             pkt_sums = [packet]
@@ -247,7 +254,7 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
         if origin_ip not in PKT_PATH.keys():
             cur_set_ip = None
             for neibor_ip in NEIBERLIST:
-                if NEIBERLIST[neibor_ip][CON_SOCKET] == service:
+                if NEIBERLIST[neibor_ip]['socket'] == service:
                     cur_set_ip = neibor_ip
             holdings = list(NEIBERLIST.keys())
             holdings.remove(cur_set_ip)
@@ -272,7 +279,7 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
             if not second_ip:
                 second_ip = origin_ip
 
-        socket_sent = NEIBERLIST[second_ip][CON_SOCKET]
+        socket_sent = NEIBERLIST[second_ip]['socket']
 
         if MY_IP and TCP_IP:
             second_ip = origin_ip
@@ -280,11 +287,11 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
                 return
 
         if second_ip not in PKT_LIST:
-            PKT_LIST[second_ip] = {SET_PACKET: pkt_sums, SET_SOCKET: socket_sent}
-        elif second_ip in PKT_LIST and not PKT_LIST[second_ip][SET_PACKET]:
-            PKT_LIST[second_ip][SET_PACKET] = pkt_sums
+            PKT_LIST[second_ip] = {SET_PACKET: pkt_sums, SET_SOCKET: NEIBERLIST[second_ip]['socket']}
+        elif second_ip in PKT_LIST and not PKT_LIST[second_ip]["packet"]:
+            PKT_LIST[second_ip]["packet"] = pkt_sums
         else:
-            PKT_LIST[second_ip][SET_PACKET].extend(pkt_sums)
+            PKT_LIST[second_ip]["packet"].extend(pkt_sums)
 
         if mode == MORE_PKT:
             return
@@ -292,7 +299,8 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
         finish_time = NEIBERLIST[second_ip][CON_TIMER]
         if not finish_time.is_alive():
             cur_mode = IS_AVAILABLE
-            packet_available = create_greeting_pkt(socket.inet_aton(NEIBERLIST[second_ip][CON_IP]), socket.inet_aton(second_ip), bytes(3), cur_mode,(bytes(),))
+            packet_available = create_greeting_pkt(socket.inet_aton(NEIBERLIST[second_ip][CON_IP]),
+                                                   socket.inet_aton(second_ip), bytes(3), cur_mode, (bytes(),))
             if TCP_IP and MY_IP:
                 udp_address = NEIBERLIST[second_ip][CON_ADDRESS]
                 socket_sent.sendto(packet_available, udp_address)
@@ -336,12 +344,12 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
         cur_mode = DISTANCE
         rcv_latt = int.from_bytes(axis, byteorder='big')
         rcv_longt = int.from_bytes(yaxis, byteorder='big')
-        distance = math.floor(math.sqrt((LATITUDE - rcv_latt) ** 2 + (LONGITUDE - rcv_longt) ** 2))
+        distance = cal_distance(rcv_latt, rcv_longt)
 
-        if distance > 1000:
+        if distance > MAX_DIS:
             return
 
-        NEIBERLIST[socket.inet_ntoa(source_ip)][CON_DISTANCE] = distance
+        NEIBERLIST[socket.inet_ntoa(source_ip)]['direct_distance'] = distance
         if socket.inet_ntoa(source_ip) not in PKT_PATH or (
                 socket.inet_ntoa(source_ip) in PKT_PATH and PKT_PATH[socket.inet_ntoa(source_ip)][PKT_DISTANCE] > distance):
             PKT_PATH[socket.inet_ntoa(source_ip)] = {PKT_SWITCH: None, PKT_DISTANCE: distance}
@@ -358,8 +366,9 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
                 continue
             from_ip = NEIBERLIST[neibor_ip][CON_IP]
             end_ip = neibor_ip
-            next_dis = (distance + NEIBERLIST[neibor_ip][CON_DISTANCE]).to_bytes(4, byteorder='big')
-            cur_pkt = create_greeting_pkt(socket.inet_aton(from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode, (source_ip, next_dis,))
+            next_dis = (distance + NEIBERLIST[neibor_ip]['direct_distance']).to_bytes(4, byteorder='big')
+            cur_pkt = create_greeting_pkt(socket.inet_aton(from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode,
+                                          (source_ip, next_dis,))
 
             n_socket = NEIBERLIST[neibor_ip][CON_SOCKET]
             if pro_type == TYPE[0]:
@@ -377,24 +386,23 @@ def greeting_recv(packet, client_type, service, pro_type="TCP", udp_address=None
 
         cur_mode = DISTANCE
         origin_sip = socket.inet_ntoa(source_ip)
-        o_dst_ip = socket.inet_ntoa(destination_ip)
-        o_target_ip = socket.inet_ntoa(target_ip)
+        fin_ip = socket.inet_ntoa(destination_ip)
+        fin_aim_ip = socket.inet_ntoa(target_ip)
         int_distance = int.from_bytes(distance, byteorder='big')
 
-        if (o_target_ip in PKT_PATH and PKT_PATH[o_target_ip][PKT_SWITCH] == origin_sip and PKT_PATH[o_target_ip][PKT_DISTANCE] < int_distance):
+        if fin_aim_ip in PKT_PATH and PKT_PATH[fin_aim_ip][PKT_SWITCH] == origin_sip and PKT_PATH[fin_aim_ip][PKT_DISTANCE] < int_distance:
             return
 
-        if o_target_ip != TCP_IP and (not o_target_ip in PKT_PATH) or (
-                o_target_ip in PKT_PATH and PKT_PATH[o_target_ip][PKT_DISTANCE] > int_distance):
-            if not MY_IP or (MY_IP and o_target_ip != MY_IP):
-                PKT_PATH[o_target_ip] = {
-                    PKT_SWITCH: origin_sip, PKT_DISTANCE: int_distance}
+        if fin_aim_ip != TCP_IP and (fin_aim_ip not in PKT_PATH) or (
+                fin_aim_ip in PKT_PATH and PKT_PATH[fin_aim_ip][PKT_DISTANCE] > int_distance):
+            if not MY_IP or (MY_IP and fin_aim_ip != MY_IP):
+                PKT_PATH[fin_aim_ip] = {PKT_SWITCH: origin_sip, PKT_DISTANCE: int_distance}
 
         for neibor_ip in NEIBERLIST.keys():
-            if neibor_ip != origin_sip and neibor_ip != o_dst_ip and neibor_ip != o_target_ip:
+            if neibor_ip != origin_sip and neibor_ip != fin_ip and neibor_ip != fin_aim_ip:
                 from_ip = NEIBERLIST[neibor_ip][CON_IP]
                 end_ip = neibor_ip
-                cur_dis_format = int_distance + NEIBERLIST[neibor_ip][CON_DISTANCE]
+                cur_dis_format = int_distance + NEIBERLIST[neibor_ip]['direct_distance']
                 cur_distance = cur_dis_format.to_bytes(4, byteorder='big')
                 cur_pkt = create_greeting_pkt(socket.inet_aton(from_ip), socket.inet_aton(end_ip), bytes(3), cur_mode, (
                     target_ip, cur_distance,))
